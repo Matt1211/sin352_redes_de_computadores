@@ -39,17 +39,16 @@ struct pkt
 
 /********* STUDENTS WRITE THE NEXT SEVEN ROUTINES *********/
 
-#define GBN 0;
+#define GBN 0; // 0 para stop and wait, 1 para go back N
 int sequence_number_a;
 int sequence_number_b;
 bool senderIsWaiting;
 struct pkt last_packet_sent = NULL;
 
-
-//Function para calcular o checksum de um dado pacote
-//soma numero da sequencia do pacote (id)
-//soma numero de acknowledgment (acknum)
-//soma valor dos caracteres ascii em inteiro para cada caracter do payload
+// Function para calcular o checksum de um dado pacote
+// soma numero da sequencia do pacote (id)
+// soma numero de acknowledgment (acknum)
+// soma valor dos caracteres ascii em inteiro para cada caracter do payload
 int calculate_checksum(struct pkt packet)
 {
   int sum = 0;
@@ -57,7 +56,7 @@ int calculate_checksum(struct pkt packet)
   sum += packet.seqnum;
   sum += packet.acknum;
 
-  //iterando por 20 vezes pq eh o tamanho maximo do payload
+  // iterando por 20 vezes pq eh o tamanho maximo do payload
   for (int i = 0; i < 20; i++)
   {
     sum += packet.payload[i];
@@ -69,9 +68,7 @@ int calculate_checksum(struct pkt packet)
 /* called from layer 5, passed the data to be sent to other side */
 A_output(message) struct msg message;
 {
-#if GBN // aqui vai rodar go back n se tiver 1
 
-#else // aqui vai rodar o alternating bit/stop and wait
   if (senderIsWaiting)
   {
     printf("sender busy");
@@ -83,7 +80,7 @@ A_output(message) struct msg message;
 
   struct pkt packet;
 
-  packet.seqnum = sequence_number_a; // id
+  packet.seqnum = sequence_number_a; // seqnum
   strcpy(packet.payload, message);   // payload
   packet.acknum = 0;                 // acknowledgement number
 
@@ -94,8 +91,6 @@ A_output(message) struct msg message;
   starttimer(A, 20.0);
 
   return;
-
-#endif // codigo em comum dos algoritmos supracitados
 }
 
 B_output(message) /* need be completed only for extra credit */
@@ -106,18 +101,41 @@ B_output(message) /* need be completed only for extra credit */
 /* called from layer 3, when a packet arrives for layer 4 */
 A_input(packet) struct pkt packet;
 {
+  int checksum_result = calculate_checksum(packet);
+
+  if (packet.checksum != checksum_result)
+  {
+    printf("deu ruim mulekeee"); // provavelmente corrompido.
+    return;                      // retorna pra dar um timeout no timer, iniciado em starttimer no A_output
+  }
+
+  if (packet.acknum != sequence_number_a)
+  {
+    printf("deu ruim mulekeee"); // pacote nao foi corrompido, mas veio o ack errado.
+    return;                      // retorna pra dar um timeout no timer, iniciado em starttimer no A_output
+  }
+
+  printf("correctly acknowledged. Next packet");
+  stoptimer(A);                              // parar o timer, já que a requisição foi concluída com sucesso
+  senderIsWaiting = false;                   // se prepara para enviar o proximo pacote, agora que a espera acabou
+  sequence_number_a = 1 - sequence_number_a; // prepara o seqnum pro proximo pacote
 }
 
 /* called when A's timer goes off */
 A_timerinterrupt()
 {
+  // funcao para determinar que o tempo habil para resposta foi superado. Timed out.
+  //  ack ou o proprio pacote foram perdidos e/ou corrompidos.
+
+  tolayer3(A, last_packet_sent); // tenta reenviar o ultimo pacote enviado, ja que ele foi corrompido ou se perdeu.
+  starttimer(A, 20.0)            // inicia o timer de novo, ja que essa é uma retentativa.
 }
 
 /* the following routine will be called once (only) before any other */
 /* entity A routines are called. You can use it to do any initialization */
 A_init()
 {
-  sequence_number_a = 0; // vai fazer o envio do primeiro pacote (id = 0)
+  sequence_number_a = 0; // vai fazer o envio do primeiro pacote (seqnum = 0)
 }
 
 /* Note that with simplex transfer from a-to-B, there is no B_output() */
@@ -125,7 +143,32 @@ A_init()
 /* called from layer 3, when a packet arrives for layer 4 at B*/
 B_input(packet) struct pkt packet;
 {
-  calculate_checksum(packet);
+  int checksum_result = calculate_checksum(packet);
+
+  if ((checksum_result != packet.checksum))
+  {
+    printf("packet corrupted");
+    return;
+  }
+
+  if (sequence_number_b == packet.seqnum) // verifica se o pacote recebido é o que eu deveria receber agora mesmo
+  {
+    tolayer5(B, packet.payload);                          // propaga a mensagem para a camada da aplicação
+    struct pkt ack_packet;                                // cria novo pacote ack para retorno
+    ack_packet.acknum = sequence_number_b;                // setta o acknum como o mesmo numero do pacote que acabou de ser verificado
+    ack_packet.checksum = calculate_checksum(ack_packet); // setta o checksum, para validacao no remetente
+    tolayer3(B, ack_packet);                              // manda para a camada de rede o pacote contendo o ACK -> manda pra A
+
+    sequence_number_b = 1 - sequence_number_b; // alterna o sequence number de b -> pra que?
+  }
+  else // se receber duplicatas, retorna o ack mas sem duplicar na camada de application (tolayer5)
+  {
+    struct pkt ack_packet;
+    ack_packet.acknum = packet.seqnum;
+    ack_packet.checksum = calculate_checksum(ack_packet);
+    tolayer3(B, ack_packet);
+    printf("received duplicate. Resending ack");
+  }
 }
 
 /* called when B's timer goes off */
