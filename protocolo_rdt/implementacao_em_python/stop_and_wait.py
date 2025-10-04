@@ -1,4 +1,3 @@
-
 # ******************************************************************
 # EMULADOR DE REDE ALTERNATING BIT E GO-BACK-N: VERSÃO 1.1  J.F.Kurose
 #
@@ -37,7 +36,7 @@ class Msg:
 # Um "Pkt" é a unidade de dados passada da camada 4 (código do aluno)
 # para a camada 3 (código do professor). Estrutura de pacote pré-definida.
 class Pkt:
-    def __init__(self, seqnum, acknum, checksum, payload):
+    def __init__(self, seqnum, acknum, checksum, payload=""):
         self.seqnum = seqnum
         self.acknum = acknum
         self.checksum = checksum
@@ -78,6 +77,11 @@ class RDTEmulator:
         self.nlost = 0
         self.ncorrupt = 0
         self.time = 0.0
+        # Variáveis de estado do protocolo
+        self.sequence_number_a = 0
+        self.sequence_number_b = 0
+        self.sender_is_waiting = False
+        self.last_packet_sent = None
 
 
     # jimsrand(): retorna um float no intervalo [0,1].
@@ -145,7 +149,11 @@ class RDTEmulator:
             self.ncorrupt += 1
             x = self.jimsrand()
             if x < 0.75:
-                mypkt.payload = 'Z' + mypkt.payload[1:]
+                # Corrompe o payload
+                if len(mypkt.payload) > 0:
+                    mypkt.payload = 'Z' + mypkt.payload[1:]
+                else:
+                    mypkt.payload = 'Z'
             elif x < 0.875:
                 mypkt.seqnum = 999999
             else:
@@ -160,12 +168,42 @@ class RDTEmulator:
         if self.TRACE > 2:
             print(f"          TOLAYER5: dados recebidos: {datasent}")
 
-
+    ############################################################################
     # As próximas sete rotinas devem ser implementadas pelo aluno
-    #
+    ############################################################################
+    
+    # Função para calcular o checksum de um dado pacote
+    def calculate_checksum(self, packet):
+        soma = 0
+        soma += packet.seqnum
+        soma += packet.acknum
+        for char in packet.payload:
+            soma += ord(char)
+        return soma
+
     # Chamado pela camada 5, recebe os dados para enviar ao outro lado
     def A_output(self, message):
-        pass
+        if self.sender_is_waiting:
+            print("Sender busy, dropping new message.")
+            return
+
+        self.sender_is_waiting = True
+        
+        # Cria o pacote
+        packet = Pkt(seqnum=self.sequence_number_a, 
+                     acknum=0, 
+                     checksum=0, 
+                     payload=message.data)
+        
+        # Calcula o checksum e o insere no pacote
+        packet.checksum = self.calculate_checksum(packet)
+        
+        # Salva uma cópia para possível retransmissão
+        self.last_packet_sent = packet
+        
+        # Envia o pacote e inicia o timer
+        self.tolayer3(A, self.last_packet_sent)
+        self.starttimer(A, 20.0)
 
     # Chamado pela camada 5, apenas se for modo bidirecional (crédito extra)
     def B_output(self, message):
@@ -173,15 +211,53 @@ class RDTEmulator:
 
     # Chamado pela camada 3, quando um pacote chega para a camada 4
     def A_input(self, packet):
-        pass
+        checksum_result = self.calculate_checksum(packet)
+
+        # Se o pacote estiver corrompido ou o ack for errado, ignora
+        if packet.checksum != checksum_result or packet.acknum != self.sequence_number_a:
+            print("A: Received corrupt packet or wrong ACK. Ignoring.")
+            return # Deixa o timer estourar
+
+        # Pacote de ACK correto recebido
+        print("A: Correctly acknowledged. Ready for next packet.")
+        self.stoptimer(A)
+        self.sender_is_waiting = False
+        self.sequence_number_a = 1 - self.sequence_number_a
 
     # Chamado pela camada 3, quando um pacote chega para a camada 4 em B
     def B_input(self, packet):
-        pass
+        checksum_result = self.calculate_checksum(packet)
+        
+        # Se o pacote estiver corrompido, simplesmente o descarta
+        if packet.checksum != checksum_result:
+            print("B: Packet corrupted. Discarding.")
+            return
+            
+        # Verifica se é o pacote esperado
+        if packet.seqnum == self.sequence_number_b:
+            # Caminho feliz: pacote correto e esperado
+            self.tolayer5(B, packet.payload)
+            
+            # Cria e envia o ACK
+            ack_packet = Pkt(seqnum=0, acknum=self.sequence_number_b, checksum=0)
+            ack_packet.checksum = self.calculate_checksum(ack_packet)
+            self.tolayer3(B, ack_packet)
+            
+            # Atualiza o estado para esperar o próximo pacote
+            self.sequence_number_b = 1 - self.sequence_number_b
+        else:
+            # Pacote duplicado. Não entrega os dados, mas reenvia o ACK.
+            print("B: Received duplicate. Resending ACK.")
+            ack_packet = Pkt(seqnum=0, acknum=packet.seqnum, checksum=0)
+            ack_packet.checksum = self.calculate_checksum(ack_packet)
+            self.tolayer3(B, ack_packet)
 
     # Chamado quando o timer de A dispara
     def A_timerinterrupt(self):
-        pass
+        print("A: Timer expired. Retransmitting packet.")
+        # Reenvia o último pacote e reinicia o timer
+        self.tolayer3(A, self.last_packet_sent)
+        self.starttimer(A, 20.0)
 
     # Chamado quando o timer de B dispara
     def B_timerinterrupt(self):
@@ -189,11 +265,13 @@ class RDTEmulator:
 
     # Chamado uma vez antes de qualquer rotina de A ser chamada (inicialização)
     def A_init(self):
-        pass
+        self.sequence_number_a = 0
+        self.sender_is_waiting = False
+        self.last_packet_sent = None
 
     # Chamado uma vez antes de qualquer rotina de B ser chamada (inicialização)
     def B_init(self):
-        pass
+        self.sequence_number_b = 0
 
 
     # Loop principal do simulador
@@ -206,7 +284,8 @@ class RDTEmulator:
                 break
             event = self.evlist.pop(0)  # pega próximo evento
             self.time = event.evtime    # atualiza tempo
-            if self.nsim == self.nsimmax:
+            if self.nsim >= self.nsimmax:
+                print("Simulation limit reached.")
                 break
             if event.evtype == FROM_LAYER5:
                 self.generate_next_arrival()  # agenda próxima chegada
